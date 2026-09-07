@@ -205,6 +205,20 @@ impl MockHugeFaceInvoice {
         1 // Listed
     }
 
+    pub fn get_funding_terms(env: Env, _invoice_id: BytesN<32>) -> (u32, u128, u32) {
+        (
+            1, // Listed
+            env.storage()
+                .instance()
+                .get(&InvKey(Symbol::new(&env, "face")))
+                .unwrap(),
+            env.storage()
+                .instance()
+                .get(&InvKey(Symbol::new(&env, "disc")))
+                .unwrap(),
+        )
+    }
+
     pub fn get_issuer(env: Env, _invoice_id: BytesN<32>) -> Address {
         env.storage()
             .instance()

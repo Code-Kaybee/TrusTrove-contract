@@ -4276,7 +4276,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000008"
               },
               {
-                "symbol": "get_status"
+                "symbol": "get_funding_terms"
               }
             ],
             "data": {
@@ -4299,11 +4299,24 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "get_status"
+                "symbol": "get_funding_terms"
               }
             ],
             "data": {
-              "u32": 1
+              "vec": [
+                {
+                  "u32": 1
+                },
+                {
+                  "u128": {
+                    "hi": 0,
+                    "lo": 1
+                  }
+                },
+                {
+                  "u32": 5000
+                }
+              ]
             }
           }
         }
@@ -4549,107 +4562,6 @@
             ],
             "data": {
               "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "000000000000000000000000000000000000000000000000000000000000000a",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_call"
-              },
-              {
-                "bytes": "0000000000000000000000000000000000000000000000000000000000000008"
-              },
-              {
-                "symbol": "get_face_value"
-              }
-            ],
-            "data": {
-              "bytes": "6fb2f084e0dbc92522ee42dca2bc6f96ea9e20cf42af8630b90b605979210d0d"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000008",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_return"
-              },
-              {
-                "symbol": "get_face_value"
-              }
-            ],
-            "data": {
-              "u128": {
-                "hi": 0,
-                "lo": 1
-              }
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "000000000000000000000000000000000000000000000000000000000000000a",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_call"
-              },
-              {
-                "bytes": "0000000000000000000000000000000000000000000000000000000000000008"
-              },
-              {
-                "symbol": "get_discount_bps"
-              }
-            ],
-            "data": {
-              "bytes": "6fb2f084e0dbc92522ee42dca2bc6f96ea9e20cf42af8630b90b605979210d0d"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000008",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_return"
-              },
-              {
-                "symbol": "get_discount_bps"
-              }
-            ],
-            "data": {
-              "u32": 5000
             }
           }
         }

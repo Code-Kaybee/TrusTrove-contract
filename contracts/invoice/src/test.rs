@@ -1477,6 +1477,20 @@ fn test_get_funding_asset_returns_correct_asset() {
 }
 
 #[test]
+fn test_get_funding_terms_returns_correct_values() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &200);
+
+    let (status, face_value, discount_bps) = client.get_funding_terms(&invoice_id);
+    assert_eq!(status, 1, "status should be 1 (Listed)");
+    assert_eq!(face_value, 1_000_000_000);
+    assert_eq!(discount_bps, 200);
+}
+
+#[test]
 fn test_expire_listing_succeeds_by_issuer() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
@@ -2632,6 +2646,14 @@ fn test_create_fails_uninitialized_registry() {
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let usdc = Address::generate(&env);
     client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_get_funding_terms_unknown_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    client.get_funding_terms(&fake_id);
 }
 
 #[test]
