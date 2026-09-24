@@ -326,7 +326,14 @@ fn setup() -> TestEnv {
     escrow.initialize(&admin, &pool_id, &usdc_id);
 
     let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
+    pool.initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &admin,
+    );
 
     invoice.add_supported_asset(&usdc_id);
     invoice.add_supported_asset(&xlm_id);
@@ -1106,7 +1113,14 @@ fn test_default_max_utilization_in_stats() {
     let pool_id = env.register_contract(None, PoolContract);
     RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
     let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
+    pool.initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &admin,
+    );
     let stats = pool.get_stats();
     assert_eq!(stats.max_utilization_bps, 8500);
 }
@@ -2645,7 +2659,9 @@ fn test_initialize_rejects_each_pairwise_address_collision() {
 
         let pool_id = env.register_contract(None, PoolContract);
         let pool = PoolContractClient::new(&env, &pool_id);
-        let res = pool.try_initialize(&addrs[0], &addrs[1], &addrs[2], &addrs[3], &addrs[4]);
+        let res = pool.try_initialize(
+            &addrs[0], &addrs[1], &addrs[2], &addrs[3], &addrs[4], &addrs[0],
+        );
         assert!(
             res.is_err(),
             "collision between initialize() params {i} and {j} should be rejected"
@@ -2729,7 +2745,14 @@ fn test_deposit_extends_instance_ttl_when_below_threshold() {
     );
 
     let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
+    pool.initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &admin,
+    );
 
     // After initialize: TTL should be bumped to ~TTL_EXTEND_TO.
     let ttl_after = env.as_contract(&pool_id, || env.storage().instance().get_ttl());
@@ -2886,12 +2909,20 @@ fn test_double_initialize_panics() {
                 escrow_id.clone(),
                 usdc_id.clone(),
                 registry_id.clone(),
+                admin.clone(),
             )
                 .into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
+    pool.initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &admin,
+    );
 
     // Verify storage state after first initialize
     env.as_contract(&pool_id, || {
@@ -2911,10 +2942,29 @@ fn test_double_initialize_panics() {
         assert_eq!(stored_escrow, escrow_id);
         let stored_usdc: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
         assert_eq!(stored_usdc, usdc_id);
+        let stored_fee: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProtocolFeeBps)
+            .unwrap();
+        assert_eq!(stored_fee, 0);
+        let stored_treasury: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TreasuryAddress)
+            .unwrap();
+        assert_eq!(stored_treasury, admin);
     });
 
     // Second initialize — panics with AlreadyInitialized (#1)
-    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
+    pool.initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &admin,
+    );
 }
 
 #[test]
@@ -3059,7 +3109,14 @@ mod real_registry_integration {
         escrow.initialize(&admin, &pool_id, &usdc_id);
 
         let pool = PoolContractClient::new(&env, &pool_id);
-        pool.initialize(&admin, &invoice_id_addr, &escrow_id, &usdc_id, &registry_id);
+        pool.initialize(
+            &admin,
+            &invoice_id_addr,
+            &escrow_id,
+            &usdc_id,
+            &registry_id,
+            &admin,
+        );
 
         invoice.add_supported_asset(&usdc_id);
         invoice.set_pool_contract(&pool_id);
@@ -3235,7 +3292,14 @@ fn test_initialize_emits_pool_initialized_event() {
     RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_addr, &usdc_id);
 
     let pool = PoolContractClient::new(&env, &pool_addr);
-    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
+    pool.initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &admin,
+    );
 
     let events = env.events().all();
     let mut found = false;
@@ -3888,4 +3952,56 @@ fn test_default_zero_protocol_fee_preserves_refunded_repayment_accounting_unchan
         after_stats.total_deposits - before_stats.total_deposits,
         expected_yield
     );
+}
+
+// ============== ISSUE #765: PROTOCOL FEE STORAGE AND INITIALIZATION ==============
+
+#[test]
+fn test_protocol_fee_storage_initialized_to_zero_and_admin_treasury() {
+    let te = setup();
+    // Freshly initialized pool must read back fee_bps == 0 and treasury == admin
+    assert_eq!(te.pool.get_protocol_fee_bps(), 0);
+    assert_eq!(te.pool.get_treasury(), te.admin);
+}
+
+#[test]
+fn test_set_protocol_fee_updates_both_stored_values_and_reads_back() {
+    let te = setup();
+    let treasury = Address::generate(&te.env);
+    let fee_bps = 750u32; // 7.5%
+
+    let updated = te.pool.set_protocol_fee(&fee_bps, &treasury);
+    assert!(updated);
+
+    assert_eq!(te.pool.get_protocol_fee_bps(), 750);
+    assert_eq!(te.pool.get_treasury(), treasury);
+}
+
+#[test]
+fn test_protocol_fee_storage_initialized_with_custom_treasury() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let invoice_id = env.register_contract(None, RealInvoice);
+    let escrow_id = env.register_contract(None, RealEscrow);
+    let usdc_id = env.register_contract(None, MockToken);
+    let registry_id = env.register_contract(None, MockRegistry);
+    let custom_treasury = Address::generate(&env);
+
+    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
+    let pool_id = env.register_contract(None, PoolContract);
+    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
+
+    let pool = PoolContractClient::new(&env, &pool_id);
+    pool.initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &custom_treasury,
+    );
+
+    assert_eq!(pool.get_protocol_fee_bps(), 0);
+    assert_eq!(pool.get_treasury(), custom_treasury);
 }
