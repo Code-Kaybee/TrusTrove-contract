@@ -3315,3 +3315,19 @@ fn test_get_escrow_contract_panics_when_uninitialized() {
     let pool = PoolContractClient::new(&env, &pool_id);
     let _ = pool.get_escrow_contract();
 }
+
+// ============== CONSTANTS LOCATION TESTS (issue #592) ==============
+
+// MIN_INITIAL_DEPOSIT and DEFAULT_MAX_UTILIZATION_BPS must be importable from
+// `constants` (re-exported via `pub use constants::*` in lib.rs) and hold the
+// canonical values.
+#[test]
+fn test_min_initial_deposit_constant_value() {
+    assert_eq!(MIN_INITIAL_DEPOSIT, 10_000_000);
+}
+
+#[test]
+fn test_default_max_utilization_bps_constant_value() {
+    use crate::DEFAULT_MAX_UTILIZATION_BPS;
+    assert_eq!(DEFAULT_MAX_UTILIZATION_BPS, 8500);
+}
