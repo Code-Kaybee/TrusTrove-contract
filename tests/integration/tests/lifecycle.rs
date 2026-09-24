@@ -163,7 +163,14 @@ fn test_cross_contract_invoice_pool_escrow_lifecycle() {
     escrow.initialize(&admin, &pool_id, &usdc_id);
 
     let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
+    pool.initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &admin,
+    );
     pool.set_max_utilization(&admin, &10000); // 100% cap
 
     // 4. Issuer creates invoice
@@ -213,7 +220,14 @@ fn test_cross_contract_unauthorized_pool_setter_rejected() {
     let usdc_id = Address::generate(&env);
 
     let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
+    pool.initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &admin,
+    );
 
     // Non-admin call without authorization must fail
     let attacker = Address::generate(&env);
