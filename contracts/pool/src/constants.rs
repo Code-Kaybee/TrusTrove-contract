@@ -12,3 +12,6 @@ pub use trusttrove_ttl::THRESHOLD as TTL_THRESHOLD;
 /// Prevents share-price griefing by requiring the initial deposit in an empty pool
 /// to be at least this floor.
 pub const MIN_INITIAL_DEPOSIT: u128 = 10_000_000;
+
+/// Maximum protocol fee in basis points (2000 bps = 20%).
+pub const MAX_PROTOCOL_FEE_BPS: u32 = 2000;
