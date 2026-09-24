@@ -312,21 +312,10 @@ impl PoolContract {
         let usdc = token::Client::new(&env, &usdc_id);
         usdc.transfer(&lp, &env.current_contract_address(), &(usdc_amount as i128));
 
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalShares, &(total_shares + shares_to_issue));
+        Self::mint(&env, &lp, shares_to_issue);
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits + usdc_amount));
-
-        let lp_shares_key = DataKey::LPShares(lp.clone());
-        let lp_shares: u128 = env.storage().persistent().get(&lp_shares_key).unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&lp_shares_key, &(lp_shares + shares_to_issue));
-        env.storage()
-            .persistent()
-            .extend_ttl(&lp_shares_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         let lp_deposit_count_key = DataKey::LPDepositCount(lp.clone());
         let count: u32 = env
@@ -431,20 +420,10 @@ impl PoolContract {
             &(usdc_to_return as i128),
         );
 
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalShares, &(total_shares - shares));
+        let remaining_shares = Self::burn(&env, &lp, shares);
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits - usdc_to_return));
-
-        let remaining_shares = lp_shares - shares;
-        env.storage()
-            .persistent()
-            .set(&lp_shares_key, &remaining_shares);
-        env.storage()
-            .persistent()
-            .extend_ttl(&lp_shares_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         if remaining_shares == 0 {
             // Full withdrawal: reset LP-scoped storage to prevent stale state
@@ -1109,7 +1088,8 @@ impl PoolContract {
     /// # Returns
     /// * `bool` - `true` when the fee is updated.
     pub fn set_protocol_fee(env: Env, fee_bps: u32, treasury: Address) -> bool {
-        let admin = Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
         admin.require_auth();
         if fee_bps > MAX_PROTOCOL_FEE_BPS {
             panic_with_error!(&env, PoolError::FeeTooHigh);
@@ -1307,10 +1287,9 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits + lp_yield));
-        env.storage().instance().set(
-            &DataKey::TotalYieldDistributed,
-            &(total_yield + lp_yield),
-        );
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalYieldDistributed, &(total_yield + lp_yield));
         env.storage()
             .instance()
             .set(&DataKey::TotalFunded, &new_total_funded);
@@ -1333,5 +1312,41 @@ impl PoolContract {
         env.storage()
             .instance()
             .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    /// Internal helper to mint LP shares (scoped for SEP-41 share issuance).
+    fn mint(env: &Env, to: &Address, amount: u128) {
+        let total_shares = Self::totals(env).shares;
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalShares, &(total_shares + amount));
+
+        let lp_shares_key = DataKey::LPShares(to.clone());
+        let lp_shares: u128 = env.storage().persistent().get(&lp_shares_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&lp_shares_key, &(lp_shares + amount));
+        env.storage()
+            .persistent()
+            .extend_ttl(&lp_shares_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    /// Internal helper to burn LP shares (scoped for SEP-41 share redemption).
+    fn burn(env: &Env, from: &Address, amount: u128) -> u128 {
+        let total_shares = Self::totals(env).shares;
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalShares, &(total_shares - amount));
+
+        let lp_shares_key = DataKey::LPShares(from.clone());
+        let lp_shares: u128 = env.storage().persistent().get(&lp_shares_key).unwrap_or(0);
+        let remaining_shares = lp_shares - amount;
+        env.storage()
+            .persistent()
+            .set(&lp_shares_key, &remaining_shares);
+        env.storage()
+            .persistent()
+            .extend_ttl(&lp_shares_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        remaining_shares
     }
 }
