@@ -3796,3 +3796,16 @@ fn test_set_protocol_fee_at_max_cap_succeeds() {
     assert_eq!(te.pool.get_protocol_fee_bps(), 2000);
     assert_eq!(te.pool.get_treasury(), treasury);
 }
+
+// ============== ISSUE #766: MAX-FEE-CAP VALIDATION TESTS ==============
+
+#[test]
+fn test_set_protocol_fee_one_bps_below_cap_succeeds() {
+    let te = setup();
+    let treasury = Address::generate(&te.env);
+    // 1999 bps is one bps below the 2000 bps (20%) max cap and must succeed
+    let ok = te.pool.set_protocol_fee(&1999, &treasury);
+    assert!(ok);
+    assert_eq!(te.pool.get_protocol_fee_bps(), 1999);
+    assert_eq!(te.pool.get_treasury(), treasury);
+}

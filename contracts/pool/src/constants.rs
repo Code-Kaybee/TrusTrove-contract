@@ -14,4 +14,6 @@ pub use trusttrove_ttl::THRESHOLD as TTL_THRESHOLD;
 pub const MIN_INITIAL_DEPOSIT: u128 = 10_000_000;
 
 /// Maximum protocol fee in basis points (2000 bps = 20%).
+/// Prevents excessive fee extraction by capping the protocol cut at 20% of yield spread,
+/// mirroring the bounds-check pattern used by `list_for_financing`'s discount cap.
 pub const MAX_PROTOCOL_FEE_BPS: u32 = 2000;
