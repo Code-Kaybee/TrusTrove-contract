@@ -144,6 +144,12 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalLossRealised, &0u128);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProtocolFeeBps, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::TreasuryAddress, &admin);
         Self::extend_instance_ttl(&env);
 
         events::pool_initialized(
@@ -1084,6 +1090,60 @@ impl PoolContract {
         events::max_utilization_updated(&env, old_cap_bps, new_cap_bps);
         Self::extend_instance_ttl(&env);
         true
+    }
+
+    /// Sets the protocol fee in basis points and the treasury address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `fee_bps` - The new protocol fee in basis points (max `2000` = 20%).
+    /// * `treasury` - The address receiving protocol cuts.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    /// * `FeeTooHigh` if `fee_bps` exceeds `MAX_PROTOCOL_FEE_BPS` (2000 bps).
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the fee is updated.
+    pub fn set_protocol_fee(env: Env, fee_bps: u32, treasury: Address) -> bool {
+        let admin = Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        if fee_bps > MAX_PROTOCOL_FEE_BPS {
+            panic_with_error!(&env, PoolError::FeeTooHigh);
+        }
+        let old_fee_bps = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProtocolFeeBps)
+            .unwrap_or(0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProtocolFeeBps, &fee_bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::TreasuryAddress, &treasury);
+        events::protocol_fee_updated(&env, old_fee_bps, fee_bps, &treasury);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Returns the current protocol fee in basis points.
+    pub fn get_protocol_fee_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ProtocolFeeBps)
+            .unwrap_or(0u32)
+    }
+
+    /// Returns the configured treasury address.
+    pub fn get_treasury(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::TreasuryAddress)
+            .unwrap_or_else(|| Self::admin(&env).expect("pool is not initialized: admin missing"))
     }
 
     fn utilization_bps_or_panic(env: &Env, total_funded: u128, total_deposits: u128) -> u32 {

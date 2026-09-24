@@ -22,4 +22,5 @@ pub enum PoolError {
     BuyerNotVerified = 19,
     EscrowAssetMismatch = 20,
     EscrowDefaultNotReleased = 21,
+    FeeTooHigh = 22,
 }

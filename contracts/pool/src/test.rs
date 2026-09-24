@@ -3614,3 +3614,36 @@ fn prop_repayment_increases_deposits_by_yield_and_clears_funded() {
         })
         .unwrap();
 }
+
+// ============== ISSUE #772: NEGATIVE-AUTH FOR SET_PROTOCOL_FEE ==============
+
+// set_protocol_fee must reject callers other than the admin (#772), matching
+// the pattern used by set_max_utilization.
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_protocol_fee_requires_admin_authorization() {
+    let te = setup();
+    let treasury = Address::generate(&te.env);
+
+    // Clear all mocked auths so the caller's require_auth() fails.
+    te.env.set_auths(&[]);
+    te.pool.set_protocol_fee(&500, &treasury);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #22)")]
+fn test_set_protocol_fee_above_max_cap_panics() {
+    let te = setup();
+    let treasury = Address::generate(&te.env);
+    te.pool.set_protocol_fee(&2001, &treasury);
+}
+
+#[test]
+fn test_set_protocol_fee_at_max_cap_succeeds() {
+    let te = setup();
+    let treasury = Address::generate(&te.env);
+    let ok = te.pool.set_protocol_fee(&2000, &treasury);
+    assert!(ok);
+    assert_eq!(te.pool.get_protocol_fee_bps(), 2000);
+    assert_eq!(te.pool.get_treasury(), treasury);
+}
