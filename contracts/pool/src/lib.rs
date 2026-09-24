@@ -363,6 +363,9 @@ impl PoolContract {
     /// * `InvalidAmount` if `shares` is zero.
     /// * `NoShares` if the LP has no shares.
     /// * `InsufficientShares` if the LP does not own enough shares.
+    /// * `MinimumDeposit` if the computed USDC redemption rounds down to zero
+    ///   (dust-guard: prevents burning shares for nothing when the share price
+    ///   is very high relative to the number of shares redeemed).
     /// * `InsufficientLiquidity` if the pool lacks enough available USDC.
     /// * `Overflow` if `shares * total_deposits` (or `shares * lp_initial_deposit`)
     ///   would overflow `u128` while computing the redemption amount.
@@ -407,6 +410,9 @@ impl PoolContract {
             .checked_mul(total_deposits)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
         let usdc_to_return = scaled / total_shares;
+        if usdc_to_return == 0 {
+            panic_with_error!(&env, PoolError::MinimumDeposit);
+        }
         if usdc_to_return > available {
             panic_with_error!(&env, PoolError::InsufficientLiquidity);
         }
@@ -825,12 +831,18 @@ impl PoolContract {
         let total_deposits = totals.deposits;
         let total_loss_realised = totals.loss_realised;
 
+        let new_total_funded = total_funded
+            .checked_sub(funded_amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
+        let new_total_deposits = total_deposits
+            .checked_sub(funded_amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
         env.storage()
             .instance()
-            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
+            .set(&DataKey::TotalFunded, &new_total_funded);
         env.storage()
             .instance()
-            .set(&DataKey::TotalDeposits, &(total_deposits - funded_amount));
+            .set(&DataKey::TotalDeposits, &new_total_deposits);
         env.storage().instance().set(
             &DataKey::TotalLossRealised,
             &(total_loss_realised + funded_amount),
@@ -1201,6 +1213,9 @@ impl PoolContract {
         let total_funded = totals.funded;
         let total_yield = totals.yield_distributed;
 
+        let new_total_funded = total_funded
+            .checked_sub(funded_amount)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits + yield_amount));
@@ -1210,7 +1225,7 @@ impl PoolContract {
         );
         env.storage()
             .instance()
-            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
+            .set(&DataKey::TotalFunded, &new_total_funded);
 
         let active_count = totals.active_invoices;
         let new_active_count = active_count

@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+use proptest::prelude::*;
+use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{
@@ -3314,4 +3316,301 @@ fn test_get_escrow_contract_panics_when_uninitialized() {
     let pool_id = env.register_contract(None, PoolContract);
     let pool = PoolContractClient::new(&env, &pool_id);
     let _ = pool.get_escrow_contract();
+}
+
+// ============== CONSTANTS LOCATION TESTS (issue #592) ==============
+
+// MIN_INITIAL_DEPOSIT and DEFAULT_MAX_UTILIZATION_BPS must be importable from
+// `constants` (re-exported via `pub use constants::*` in lib.rs) and hold the
+// canonical values.
+#[test]
+fn test_min_initial_deposit_constant_value() {
+    assert_eq!(MIN_INITIAL_DEPOSIT, 10_000_000);
+}
+
+#[test]
+fn test_default_max_utilization_bps_constant_value() {
+    use crate::DEFAULT_MAX_UTILIZATION_BPS;
+    assert_eq!(DEFAULT_MAX_UTILIZATION_BPS, 8500);
+}
+
+// ============== WITHDRAW DUST-GUARD TESTS (issue #593) ==============
+
+// Withdraw must reject when the computed USDC redemption rounds down to zero,
+// just as deposit rejects when the computed share count rounds down to zero.
+// This prevents an LP from burning shares for nothing.
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn test_withdraw_rejects_dust_shares_returning_zero_usdc() {
+    // To make (shares * total_deposits) / total_shares == 0 we need
+    // shares * total_deposits < total_shares.
+    // Set total_shares very large and total_deposits very small so a
+    // withdrawal of 1 share rounds down to 0 USDC.
+    let te = setup();
+    let total_shares: u128 = 1_000_000_000_000;
+    let total_deposits: u128 = 1;
+
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalShares, &total_shares);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &total_deposits);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &0u128);
+        te.env
+            .storage()
+            .persistent()
+            .set(&DataKey::LPShares(te.lp.clone()), &total_shares);
+    });
+
+    // 1 * 1 / 1_000_000_000_000 == 0 USDC -> must be rejected.
+    te.pool.withdraw(&te.lp, &1);
+}
+
+// Dust-guard must not over-reject: a withdrawal that returns at least 1 USDC
+// must succeed even when the share price is very small.
+#[test]
+fn test_withdraw_dust_guard_does_not_reject_nonzero_return() {
+    let te = setup();
+    // Standard deposit: 1 share == 1 stroop, returns > 0.
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    let usdc = te.pool.withdraw(&te.lp, &1);
+    assert!(
+        usdc >= 1,
+        "single-share withdraw must return at least 1 stroop"
+    );
+}
+
+// A rejected dust withdrawal must leave pool state and LP shares unchanged.
+#[test]
+fn test_withdraw_dust_rejection_preserves_state() {
+    let te = setup();
+    let total_shares: u128 = 1_000_000_000_000;
+    let total_deposits: u128 = 1;
+
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalShares, &total_shares);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &total_deposits);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &0u128);
+        te.env
+            .storage()
+            .persistent()
+            .set(&DataKey::LPShares(te.lp.clone()), &total_shares);
+    });
+
+    let before = te.pool.get_stats();
+    let res = te.pool.try_withdraw(&te.lp, &1);
+    assert!(res.is_err(), "dust withdraw should be rejected");
+
+    let after = te.pool.get_stats();
+    assert_eq!(after.total_shares, before.total_shares);
+    assert_eq!(after.total_deposits, before.total_deposits);
+}
+
+// ============== CHECKED SUBTRACTION TESTS (issue #594) ==============
+
+// handle_default: TotalFunded subtraction must not panic on valid data and must
+// correctly reduce TotalFunded and TotalDeposits.
+#[test]
+fn test_handle_default_total_funded_decremented_correctly() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let before = te.pool.get_stats();
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
+    te.pool.handle_default(&invoice_id);
+
+    let after = te.pool.get_stats();
+    assert_eq!(
+        after.total_funded,
+        before.total_funded - DEFAULT_FUNDED_AMOUNT,
+        "TotalFunded must decrease by funded_amount"
+    );
+    assert_eq!(
+        after.total_deposits,
+        before.total_deposits - DEFAULT_FUNDED_AMOUNT,
+        "TotalDeposits must decrease by funded_amount on default"
+    );
+}
+
+// settle_repayment (via receive_repayment): TotalFunded subtraction must
+// correctly reduce TotalFunded back to zero after a full repayment.
+#[test]
+fn test_settle_repayment_total_funded_decremented_correctly() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let before = te.pool.get_stats();
+    assert_eq!(before.total_funded, DEFAULT_FUNDED_AMOUNT);
+
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86401);
+    te.invoice.repay(&invoice_id);
+
+    let after = te.pool.get_stats();
+    assert_eq!(
+        after.total_funded, 0,
+        "TotalFunded must be zero after full repayment"
+    );
+}
+
+// ============== PROPERTY-BASED TESTS (issue #100) ==============
+// Uses proptest's TestRunner API directly so rustfmt formats normally.
+// Case budget is 10 per property to stay within CI time budgets for the
+// Soroban in-process host.
+
+// Any valid deposit amount must result in at least 1 share when the pool is
+// empty (1:1 ratio), and the resulting share count must equal the deposit.
+#[test]
+fn prop_any_valid_initial_deposit_issues_shares_equal_to_amount() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(MIN_INITIAL_DEPOSIT..=1_000_000_000_000u128),
+            |deposit_amount| {
+                let te = setup();
+                let shares = te.pool.deposit(&te.lp, &deposit_amount);
+                prop_assert_eq!(
+                    shares,
+                    deposit_amount,
+                    "initial deposit must mint shares 1:1"
+                );
+                let stats = te.pool.get_stats();
+                prop_assert_eq!(stats.total_shares, deposit_amount);
+                prop_assert_eq!(stats.total_deposits, deposit_amount);
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+// A deposit below MIN_INITIAL_DEPOSIT on an empty pool must always be rejected
+// with InvalidAmount (#4), regardless of the exact value.
+#[test]
+fn prop_initial_deposit_below_minimum_always_rejected() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(&(1u128..MIN_INITIAL_DEPOSIT), |deposit_amount| {
+            let te = setup();
+            let result = te.pool.try_deposit(&te.lp, &deposit_amount);
+            prop_assert!(
+                result.is_err(),
+                "deposit of {deposit_amount} below minimum must be rejected"
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+// For any withdrawal of all shares after a deposit, the USDC returned must
+// equal the deposited amount (no yield, no loss).
+#[test]
+fn prop_full_withdrawal_returns_exact_deposit_with_no_yield() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(MIN_INITIAL_DEPOSIT..=1_000_000_000_000u128),
+            |deposit_amount| {
+                let te = setup();
+                let shares = te.pool.deposit(&te.lp, &deposit_amount);
+                let usdc_returned = te.pool.withdraw(&te.lp, &shares);
+                prop_assert_eq!(
+                    usdc_returned,
+                    deposit_amount,
+                    "full withdrawal must return exact deposit"
+                );
+                let stats = te.pool.get_stats();
+                prop_assert_eq!(stats.total_shares, 0);
+                prop_assert_eq!(stats.total_deposits, 0);
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+// After a full withdrawal the LP's position must be empty: zero shares,
+// zero USDC value, deposit count zeroed.
+#[test]
+fn prop_full_withdrawal_clears_lp_position() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(MIN_INITIAL_DEPOSIT..=1_000_000_000_000u128),
+            |deposit_amount| {
+                let te = setup();
+                let shares = te.pool.deposit(&te.lp, &deposit_amount);
+                te.pool.withdraw(&te.lp, &shares);
+                let pos = te.pool.get_lp_position(&te.lp);
+                prop_assert_eq!(pos.shares, 0);
+                prop_assert_eq!(pos.usdc_value, 0);
+                prop_assert_eq!(pos.deposit_count, 0);
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+// Deposit followed by repayment: total_deposits must increase by the yield
+// amount, and total_funded must return to zero.
+#[test]
+fn prop_repayment_increases_deposits_by_yield_and_clears_funded() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(&(1u32..=500u32), |discount_bps| {
+            let te = setup();
+            te.pool.deposit(&te.lp, &100_000_000_000);
+            let face_value: u128 = 10_000_000_000;
+            let funded_amount = face_value * (10000 - discount_bps as u128) / 10000;
+            let yield_amount = face_value * discount_bps as u128 / 10000;
+            let invoice_id =
+                create_and_list_with_params(&te, &te.usdc_id, face_value, discount_bps);
+            te.pool.fund_invoice(&invoice_id);
+
+            let before = te.pool.get_stats();
+            prop_assert_eq!(before.total_funded, funded_amount);
+
+            te.invoice.mark_shipped(&invoice_id);
+            te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+            te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+            te.env
+                .ledger()
+                .set_timestamp(te.env.ledger().timestamp() + 86401);
+            te.invoice.repay(&invoice_id);
+
+            let after = te.pool.get_stats();
+            prop_assert_eq!(after.total_funded, 0);
+            prop_assert_eq!(
+                after.total_deposits,
+                before.total_deposits - funded_amount + face_value,
+                "deposits must grow by yield_amount after repayment"
+            );
+            prop_assert_eq!(after.total_yield_distributed, yield_amount);
+            Ok(())
+        })
+        .unwrap();
 }

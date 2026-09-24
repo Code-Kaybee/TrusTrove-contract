@@ -1545,6 +1545,7 @@ name = "trusttrove-pool"
 version = "0.1.0"
 dependencies = [
  "k256",
+ "proptest",
  "soroban-sdk",
  "trusttrove-escrow",
  "trusttrove-invoice",
