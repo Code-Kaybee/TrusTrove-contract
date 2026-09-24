@@ -36,7 +36,24 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "CR0f3etFvc"
+                      },
+                      "val": {
+                        "string": "hUbpJ0Vk"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "_T0"
+                      },
+                      "val": {
+                        "string": "CkE85mpTV1B3_L3nT7"
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -141,7 +158,24 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": []
+                        "map": [
+                          {
+                            "key": {
+                              "string": "CR0f3etFvc"
+                            },
+                            "val": {
+                              "string": "hUbpJ0Vk"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "_T0"
+                            },
+                            "val": {
+                              "string": "CkE85mpTV1B3_L3nT7"
+                            }
+                          }
+                        ]
                       }
                     },
                     {
@@ -462,7 +496,24 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "CR0f3etFvc"
+                      },
+                      "val": {
+                        "string": "hUbpJ0Vk"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "_T0"
+                      },
+                      "val": {
+                        "string": "CkE85mpTV1B3_L3nT7"
+                      }
+                    }
+                  ]
                 }
               ]
             }
