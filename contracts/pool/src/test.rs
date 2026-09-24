@@ -3796,3 +3796,96 @@ fn test_set_protocol_fee_at_max_cap_succeeds() {
     assert_eq!(te.pool.get_protocol_fee_bps(), 2000);
     assert_eq!(te.pool.get_treasury(), treasury);
 }
+
+// ============== ISSUE #770: DEFAULT-ZERO PROTOCOL FEE ACCOUNTING REGRESSION ==============
+
+#[test]
+fn test_default_zero_protocol_fee_preserves_repayment_accounting_unchanged() {
+    let te = setup();
+    // Verify default protocol fee is zero and treasury is te.admin
+    assert_eq!(te.pool.get_protocol_fee_bps(), 0);
+    assert_eq!(te.pool.get_treasury(), te.admin);
+
+    let initial_deposit = 100_000_000_000u128;
+    let shares = te.pool.deposit(&te.lp, &initial_deposit);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let treasury = te.pool.get_treasury();
+    let treasury_before = usdc.balance(&treasury);
+    let before_stats = te.pool.get_stats();
+
+    let amount = DEFAULT_FACE_VALUE; // 1_200_000_000
+    let yield_amount = DEFAULT_YIELD_AMOUNT; // 200_000_000
+
+    let result = te.pool.receive_repayment(&invoice_id, &amount);
+    assert!(result);
+
+    let treasury_after = usdc.balance(&treasury);
+    let after_stats = te.pool.get_stats();
+
+    // At default 0 bps fee, treasury cut is exactly 0
+    assert_eq!(
+        treasury_after, treasury_before,
+        "treasury balance must remain completely unchanged at default 0 bps fee"
+    );
+
+    // 100% of yield goes to LPs: TotalYieldDistributed and TotalDeposits increase by full yield_amount
+    assert_eq!(
+        after_stats.total_yield_distributed - before_stats.total_yield_distributed,
+        yield_amount,
+        "TotalYieldDistributed must increase by full yield_amount"
+    );
+    assert_eq!(
+        after_stats.total_deposits - before_stats.total_deposits,
+        yield_amount,
+        "TotalDeposits must increase by full yield_amount"
+    );
+    assert_eq!(after_stats.total_funded, 0);
+
+    // LP withdrawing all shares receives initial_deposit + yield_amount (pre-fee identical behavior)
+    let returned = te.pool.withdraw(&te.lp, &shares);
+    assert_eq!(returned, initial_deposit + yield_amount);
+}
+
+#[test]
+fn test_default_zero_protocol_fee_preserves_refunded_repayment_accounting_unchanged() {
+    let te = setup();
+    assert_eq!(te.pool.get_protocol_fee_bps(), 0);
+
+    let initial_deposit = 100_000_000_000u128;
+    te.pool.deposit(&te.lp, &initial_deposit);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let treasury = te.pool.get_treasury();
+    let treasury_before = usdc.balance(&treasury);
+    let before_stats = te.pool.get_stats();
+
+    let amount = DEFAULT_FACE_VALUE; // 1_200_000_000
+    let refund = 50_000_000u128;
+    let expected_yield = amount - DEFAULT_FUNDED_AMOUNT - refund; // 150_000_000
+
+    let result = te
+        .pool
+        .receive_repayment_with_refund(&invoice_id, &amount, &refund, &te.buyer);
+    assert!(result);
+
+    let treasury_after = usdc.balance(&treasury);
+    let after_stats = te.pool.get_stats();
+
+    // Treasury cut must be zero
+    assert_eq!(treasury_after, treasury_before);
+
+    // Full expected yield goes to LPs
+    assert_eq!(
+        after_stats.total_yield_distributed - before_stats.total_yield_distributed,
+        expected_yield
+    );
+    assert_eq!(
+        after_stats.total_deposits - before_stats.total_deposits,
+        expected_yield
+    );
+}
