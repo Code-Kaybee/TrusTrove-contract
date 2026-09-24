@@ -1088,7 +1088,8 @@ impl PoolContract {
     /// # Returns
     /// * `bool` - `true` when the fee is updated.
     pub fn set_protocol_fee(env: Env, fee_bps: u32, treasury: Address) -> bool {
-        let admin = Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
         admin.require_auth();
         if fee_bps > MAX_PROTOCOL_FEE_BPS {
             panic_with_error!(&env, PoolError::FeeTooHigh);

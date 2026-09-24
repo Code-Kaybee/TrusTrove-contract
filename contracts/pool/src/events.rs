@@ -69,12 +69,7 @@ pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address
     );
 }
 
-pub fn protocol_fee_updated(
-    env: &Env,
-    old_fee_bps: u32,
-    new_fee_bps: u32,
-    treasury: &Address,
-) {
+pub fn protocol_fee_updated(env: &Env, old_fee_bps: u32, new_fee_bps: u32, treasury: &Address) {
     env.events().publish(
         (Symbol::new(env, "protocol_fee_updated"),),
         (old_fee_bps, new_fee_bps, treasury.clone()),
