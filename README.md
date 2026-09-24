@@ -139,7 +139,11 @@ deposit(lp, usdc_amount) → shares
 withdraw(lp, shares) → usdc_amount
 fund_invoice(invoice_id) → bool         ← re-verifies issuer & buyer against registry_contract
 receive_repayment(invoice_id, amount) → bool  ← invoice_contract only
+receive_repayment_with_refund(invoice_id, amount, refund, buyer) → bool ← invoice_contract only
 handle_default(invoice_id) → bool
+set_protocol_fee(fee_bps, treasury) → bool   ← admin only
+get_protocol_fee_bps() → u32
+get_treasury() → Address
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
 ```
@@ -232,10 +236,15 @@ The buyer calls `invoice.repay(invoice_id)`, which transfers `face_value` USDC *
 
 ```
 Buyer ──[face_value USDC]──► Pool
-  Pool books yield: face_value − funded_amount = discount earned
-  TotalDeposits += yield_amount  (share price rises for all LPs)
+  Pool books yield: face_value − funded_amount = gross yield
+  Protocol fee cut: protocol_cut = gross_yield × fee_bps / 10000 ──► Treasury
+  LP yield: lp_yield = gross_yield − protocol_cut
+  TotalDeposits += lp_yield  (share price rises for all LPs)
+  TotalYieldDistributed += lp_yield
 Invoice status: Confirmed → Repaid
 ```
+
+**Protocol Fee:** Defaults to 0 bps at deployment, preserving 100% yield distribution to LPs. The contract admin can configure a fee up to 2000 bps (20%) and set the treasury destination address via `pool.set_protocol_fee(fee_bps, treasury)`.
 
 Repayment does **not** flow through escrow. The escrow contract is only involved in funding (Step 3), the missing issuer release (Step 4), and default recovery (Step 7).
 
