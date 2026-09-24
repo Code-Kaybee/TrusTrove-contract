@@ -3331,3 +3331,91 @@ fn test_default_max_utilization_bps_constant_value() {
     use crate::DEFAULT_MAX_UTILIZATION_BPS;
     assert_eq!(DEFAULT_MAX_UTILIZATION_BPS, 8500);
 }
+
+// ============== WITHDRAW DUST-GUARD TESTS (issue #593) ==============
+
+// Withdraw must reject when the computed USDC redemption rounds down to zero,
+// just as deposit rejects when the computed share count rounds down to zero.
+// This prevents an LP from burning shares for nothing.
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn test_withdraw_rejects_dust_shares_returning_zero_usdc() {
+    // To make (shares * total_deposits) / total_shares == 0 we need
+    // shares * total_deposits < total_shares.
+    // Set total_shares very large and total_deposits very small so a
+    // withdrawal of 1 share rounds down to 0 USDC.
+    let te = setup();
+    let total_shares: u128 = 1_000_000_000_000;
+    let total_deposits: u128 = 1;
+
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalShares, &total_shares);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &total_deposits);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &0u128);
+        te.env
+            .storage()
+            .persistent()
+            .set(&DataKey::LPShares(te.lp.clone()), &total_shares);
+    });
+
+    // 1 * 1 / 1_000_000_000_000 == 0 USDC -> must be rejected.
+    te.pool.withdraw(&te.lp, &1);
+}
+
+// Dust-guard must not over-reject: a withdrawal that returns at least 1 USDC
+// must succeed even when the share price is very small.
+#[test]
+fn test_withdraw_dust_guard_does_not_reject_nonzero_return() {
+    let te = setup();
+    // Standard deposit: 1 share == 1 stroop, returns > 0.
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    let usdc = te.pool.withdraw(&te.lp, &1);
+    assert!(
+        usdc >= 1,
+        "single-share withdraw must return at least 1 stroop"
+    );
+}
+
+// A rejected dust withdrawal must leave pool state and LP shares unchanged.
+#[test]
+fn test_withdraw_dust_rejection_preserves_state() {
+    let te = setup();
+    let total_shares: u128 = 1_000_000_000_000;
+    let total_deposits: u128 = 1;
+
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalShares, &total_shares);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &total_deposits);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &0u128);
+        te.env
+            .storage()
+            .persistent()
+            .set(&DataKey::LPShares(te.lp.clone()), &total_shares);
+    });
+
+    let before = te.pool.get_stats();
+    let res = te.pool.try_withdraw(&te.lp, &1);
+    assert!(res.is_err(), "dust withdraw should be rejected");
+
+    let after = te.pool.get_stats();
+    assert_eq!(after.total_shares, before.total_shares);
+    assert_eq!(after.total_deposits, before.total_deposits);
+}

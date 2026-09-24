@@ -357,6 +357,9 @@ impl PoolContract {
     /// * `InvalidAmount` if `shares` is zero.
     /// * `NoShares` if the LP has no shares.
     /// * `InsufficientShares` if the LP does not own enough shares.
+    /// * `MinimumDeposit` if the computed USDC redemption rounds down to zero
+    ///   (dust-guard: prevents burning shares for nothing when the share price
+    ///   is very high relative to the number of shares redeemed).
     /// * `InsufficientLiquidity` if the pool lacks enough available USDC.
     /// * `Overflow` if `shares * total_deposits` (or `shares * lp_initial_deposit`)
     ///   would overflow `u128` while computing the redemption amount.
@@ -401,6 +404,9 @@ impl PoolContract {
             .checked_mul(total_deposits)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
         let usdc_to_return = scaled / total_shares;
+        if usdc_to_return == 0 {
+            panic_with_error!(&env, PoolError::MinimumDeposit);
+        }
         if usdc_to_return > available {
             panic_with_error!(&env, PoolError::InsufficientLiquidity);
         }
