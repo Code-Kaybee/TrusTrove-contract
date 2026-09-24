@@ -3614,3 +3614,107 @@ fn prop_repayment_increases_deposits_by_yield_and_clears_funded() {
         })
         .unwrap();
 }
+
+// ============== ISSUE #771: NONZERO PROTOCOL FEE SPLITS ==============
+
+#[test]
+fn test_freshly_initialized_pool_has_zero_protocol_fee() {
+    let te = setup();
+    assert_eq!(te.pool.get_protocol_fee_bps(), 0);
+    assert_eq!(te.pool.get_treasury(), te.admin);
+}
+
+#[test]
+fn test_nonzero_protocol_fee_splits_receive_repayment() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let treasury = Address::generate(&te.env);
+    let fee_bps = 1000u32; // 10% protocol fee (1000 bps)
+    te.pool.set_protocol_fee(&fee_bps, &treasury);
+
+    assert_eq!(te.pool.get_protocol_fee_bps(), 1000);
+    assert_eq!(te.pool.get_treasury(), treasury);
+
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let treasury_before = usdc.balance(&treasury);
+    let before_stats = te.pool.get_stats();
+
+    let amount = DEFAULT_FACE_VALUE;
+    let yield_amount = DEFAULT_YIELD_AMOUNT;
+    let expected_protocol_cut = yield_amount * (fee_bps as u128) / 10_000;
+    let expected_lp_yield = yield_amount - expected_protocol_cut;
+
+    let result = te.pool.receive_repayment(&invoice_id, &amount);
+    assert!(result);
+
+    let treasury_after = usdc.balance(&treasury);
+    let after_stats = te.pool.get_stats();
+
+    // Assert treasury address's USDC balance increased by exactly protocol_cut
+    assert_eq!(
+        treasury_after - treasury_before,
+        expected_protocol_cut as i128
+    );
+
+    // Assert TotalYieldDistributed increased by exactly lp_yield
+    assert_eq!(
+        after_stats.total_yield_distributed - before_stats.total_yield_distributed,
+        expected_lp_yield
+    );
+    assert_eq!(
+        after_stats.total_deposits - before_stats.total_deposits,
+        expected_lp_yield
+    );
+}
+
+#[test]
+fn test_nonzero_protocol_fee_splits_receive_repayment_with_refund() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let treasury = Address::generate(&te.env);
+    let fee_bps = 500u32; // 5% protocol fee (500 bps)
+    te.pool.set_protocol_fee(&fee_bps, &treasury);
+
+    assert_eq!(te.pool.get_protocol_fee_bps(), 500);
+    assert_eq!(te.pool.get_treasury(), treasury);
+
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let treasury_before = usdc.balance(&treasury);
+    let before_stats = te.pool.get_stats();
+
+    let amount = DEFAULT_FACE_VALUE;
+    let refund = 100_000_000u128; // 100M refund to buyer out of 200M surplus
+    let yield_amount = amount - DEFAULT_FUNDED_AMOUNT - refund; // 100_000_000
+    let expected_protocol_cut = yield_amount * (fee_bps as u128) / 10_000; // 5_000_000
+    let expected_lp_yield = yield_amount - expected_protocol_cut; // 95_000_000
+
+    let result = te
+        .pool
+        .receive_repayment_with_refund(&invoice_id, &amount, &refund, &te.buyer);
+    assert!(result);
+
+    let treasury_after = usdc.balance(&treasury);
+    let after_stats = te.pool.get_stats();
+
+    // Assert treasury address's USDC balance increased by exactly protocol_cut
+    assert_eq!(
+        treasury_after - treasury_before,
+        expected_protocol_cut as i128
+    );
+
+    // Assert TotalYieldDistributed increased by exactly lp_yield
+    assert_eq!(
+        after_stats.total_yield_distributed - before_stats.total_yield_distributed,
+        expected_lp_yield
+    );
+    assert_eq!(
+        after_stats.total_deposits - before_stats.total_deposits,
+        expected_lp_yield
+    );
+}

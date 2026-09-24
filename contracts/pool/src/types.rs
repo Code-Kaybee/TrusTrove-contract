@@ -88,4 +88,6 @@ pub enum DataKey {
     // being appended after it, in the same spirit, rather than inserted
     // earlier.
     RegistryContract,
+    ProtocolFeeBps,
+    TreasuryAddress,
 }
