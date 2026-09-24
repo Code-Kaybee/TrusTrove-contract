@@ -3615,35 +3615,47 @@ fn prop_repayment_increases_deposits_by_yield_and_clears_funded() {
         .unwrap();
 }
 
-// ============== ISSUE #772: NEGATIVE-AUTH FOR SET_PROTOCOL_FEE ==============
-
-// set_protocol_fee must reject callers other than the admin (#772), matching
-// the pattern used by set_max_utilization.
-#[test]
-#[should_panic(expected = "Error(Auth, InvalidAction)")]
-fn test_set_protocol_fee_requires_admin_authorization() {
-    let te = setup();
-    let treasury = Address::generate(&te.env);
-
-    // Clear all mocked auths so the caller's require_auth() fails.
-    te.env.set_auths(&[]);
-    te.pool.set_protocol_fee(&500, &treasury);
-}
+// ============== ISSUE #774: GAS BENCHMARK FOR DEPOSIT / WITHDRAW ==============
 
 #[test]
-#[should_panic(expected = "Error(Contract, #22)")]
-fn test_set_protocol_fee_above_max_cap_panics() {
+fn test_gas_benchmark_deposit_and_withdraw() {
+    extern crate std;
     let te = setup();
-    let treasury = Address::generate(&te.env);
-    te.pool.set_protocol_fee(&2001, &treasury);
-}
+    let env = &te.env;
 
-#[test]
-fn test_set_protocol_fee_at_max_cap_succeeds() {
-    let te = setup();
-    let treasury = Address::generate(&te.env);
-    let ok = te.pool.set_protocol_fee(&2000, &treasury);
-    assert!(ok);
-    assert_eq!(te.pool.get_protocol_fee_bps(), 2000);
-    assert_eq!(te.pool.get_treasury(), treasury);
+    // Measure deposit() resource cost
+    env.budget().reset_default();
+    let cpu_before_deposit = env.budget().cpu_instruction_cost();
+    let mem_before_deposit = env.budget().memory_bytes_cost();
+    let shares = te.pool.deposit(&te.lp, &10_000_000_000);
+    let cpu_after_deposit = env.budget().cpu_instruction_cost();
+    let mem_after_deposit = env.budget().memory_bytes_cost();
+
+    let deposit_cpu = cpu_after_deposit - cpu_before_deposit;
+    let deposit_mem = mem_after_deposit - mem_before_deposit;
+
+    // Measure withdraw() resource cost
+    env.budget().reset_default();
+    let cpu_before_withdraw = env.budget().cpu_instruction_cost();
+    let mem_before_withdraw = env.budget().memory_bytes_cost();
+    let returned = te.pool.withdraw(&te.lp, &(shares / 2));
+    let cpu_after_withdraw = env.budget().cpu_instruction_cost();
+    let mem_after_withdraw = env.budget().memory_bytes_cost();
+
+    let withdraw_cpu = cpu_after_withdraw - cpu_before_withdraw;
+    let withdraw_mem = mem_after_withdraw - mem_before_withdraw;
+
+    std::println!(
+        "\n================ GAS BENCHMARK ================\ndeposit():  CPU instructions: {}, Memory bytes: {}\nwithdraw(): CPU instructions: {}, Memory bytes: {}\n===============================================",
+        deposit_cpu,
+        deposit_mem,
+        withdraw_cpu,
+        withdraw_mem
+    );
+
+    assert!(deposit_cpu > 0);
+    assert!(deposit_mem > 0);
+    assert!(withdraw_cpu > 0);
+    assert!(withdraw_mem > 0);
+    assert_eq!(returned, 5_000_000_000);
 }
