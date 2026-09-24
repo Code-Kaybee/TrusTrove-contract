@@ -825,12 +825,18 @@ impl PoolContract {
         let total_deposits = totals.deposits;
         let total_loss_realised = totals.loss_realised;
 
+        let new_total_funded = total_funded
+            .checked_sub(funded_amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
+        let new_total_deposits = total_deposits
+            .checked_sub(funded_amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
         env.storage()
             .instance()
-            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
+            .set(&DataKey::TotalFunded, &new_total_funded);
         env.storage()
             .instance()
-            .set(&DataKey::TotalDeposits, &(total_deposits - funded_amount));
+            .set(&DataKey::TotalDeposits, &new_total_deposits);
         env.storage().instance().set(
             &DataKey::TotalLossRealised,
             &(total_loss_realised + funded_amount),
@@ -1201,6 +1207,9 @@ impl PoolContract {
         let total_funded = totals.funded;
         let total_yield = totals.yield_distributed;
 
+        let new_total_funded = total_funded
+            .checked_sub(funded_amount)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits + yield_amount));
@@ -1210,7 +1219,7 @@ impl PoolContract {
         );
         env.storage()
             .instance()
-            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
+            .set(&DataKey::TotalFunded, &new_total_funded);
 
         let active_count = totals.active_invoices;
         let new_active_count = active_count

@@ -3419,3 +3419,60 @@ fn test_withdraw_dust_rejection_preserves_state() {
     assert_eq!(after.total_shares, before.total_shares);
     assert_eq!(after.total_deposits, before.total_deposits);
 }
+
+// ============== CHECKED SUBTRACTION TESTS (issue #594) ==============
+
+// handle_default: TotalFunded subtraction must not panic on valid data and must
+// correctly reduce TotalFunded and TotalDeposits.
+#[test]
+fn test_handle_default_total_funded_decremented_correctly() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let before = te.pool.get_stats();
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
+    te.pool.handle_default(&invoice_id);
+
+    let after = te.pool.get_stats();
+    assert_eq!(
+        after.total_funded,
+        before.total_funded - DEFAULT_FUNDED_AMOUNT,
+        "TotalFunded must decrease by funded_amount"
+    );
+    assert_eq!(
+        after.total_deposits,
+        before.total_deposits - DEFAULT_FUNDED_AMOUNT,
+        "TotalDeposits must decrease by funded_amount on default"
+    );
+}
+
+// settle_repayment (via receive_repayment): TotalFunded subtraction must
+// correctly reduce TotalFunded back to zero after a full repayment.
+#[test]
+fn test_settle_repayment_total_funded_decremented_correctly() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let before = te.pool.get_stats();
+    assert_eq!(before.total_funded, DEFAULT_FUNDED_AMOUNT);
+
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86401);
+    te.invoice.repay(&invoice_id);
+
+    let after = te.pool.get_stats();
+    assert_eq!(
+        after.total_funded, 0,
+        "TotalFunded must be zero after full repayment"
+    );
+}
