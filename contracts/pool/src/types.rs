@@ -88,6 +88,8 @@ pub enum DataKey {
     // being appended after it, in the same spirit, rather than inserted
     // earlier.
     RegistryContract,
+    /// Stored protocol fee basis points (defaults to 0 bps).
     ProtocolFeeBps,
+    /// Stored treasury destination address (defaults to admin).
     TreasuryAddress,
 }
