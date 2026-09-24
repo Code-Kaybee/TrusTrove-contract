@@ -74,7 +74,6 @@ fn test_agent_id(env: &Env) -> Symbol {
 }
 
 fn attest_invoice(env: &Env, invoice_client: &InvoiceContractClient, invoice_id: &BytesN<32>) {
-    use k256::ecdsa::signature::hazmat::PrehashSigner;
     let payload = trusttrove_invoice::AttestationPayload {
         domain_separator: BytesN::from_array(
             env,
