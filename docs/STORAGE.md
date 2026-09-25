@@ -258,7 +258,7 @@ EscrowEvent {
 | `ActiveInvoiceCount` | `u32` | Currently funded invoices | `initialize() = 0` |
 | `MaxUtilizationBps` | `u32` | Max utilization cap (bps) | `initialize() = 8500` |
 | `ProtocolFeeBps` | `u32` | Protocol fee in basis points (max 2000 bps = 20%) | `initialize() = 0` |
-| `TreasuryAddress` | `Address` | Protocol treasury destination for fee cuts | `initialize() = admin` |
+| `TreasuryAddress` | `Address` | Protocol treasury destination for fee cuts | `initialize() = treasury (may equal admin)` |
 
 ### Persistent Storage
 
