@@ -143,6 +143,12 @@ impl PoolContract {
             .set(&DataKey::MaxUtilizationBps, &DEFAULT_MAX_UTILIZATION_BPS);
         env.storage()
             .instance()
+            .set(&DataKey::ProtocolFeeBps, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::TreasuryAddress, &admin);
+        env.storage()
+            .instance()
             .set(&DataKey::TotalLossRealised, &0u128);
         Self::extend_instance_ttl(&env);
 
@@ -1065,6 +1071,55 @@ impl PoolContract {
         true
     }
 
+    /// Returns the protocol fee in basis points.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// * `u32` - The protocol fee in basis points.
+    pub fn get_protocol_fee_bps(env: Env) -> u32 {
+        Self::protocol_fee_bps(&env)
+    }
+
+    /// Returns the treasury address for protocol fee cuts.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// * `Address` - The treasury address.
+    pub fn get_treasury(env: Env) -> Address {
+        Self::treasury_address(&env)
+    }
+
+    /// Updates the protocol fee and treasury address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The admin address for this contract.
+    /// * `fee_bps` - The new protocol fee in basis points (max 2000).
+    /// * `treasury` - The new treasury address.
+    ///
+    /// # Auth
+    /// Requires authorization from `admin`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the fee and treasury are updated.
+    ///
+    /// # Panics
+    /// * `InvalidAmount` if `fee_bps` exceeds 2000.
+    pub fn set_protocol_fee(env: Env, admin: Address, fee_bps: u32, treasury: Address) -> bool {
+        admin.require_auth();
+        if fee_bps > 2000 {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+        env.storage().instance().set(&DataKey::ProtocolFeeBps, &fee_bps);
+        env.storage().instance().set(&DataKey::TreasuryAddress, &treasury);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
     fn utilization_bps_or_panic(env: &Env, total_funded: u128, total_deposits: u128) -> u32 {
         if total_deposits == 0 {
             return 0;
@@ -1107,6 +1162,17 @@ impl PoolContract {
             .instance()
             .get(&DataKey::RegistryContract)
             .expect("pool is not initialized: registry contract missing")
+    }
+
+    fn protocol_fee_bps(env: &Env) -> u32 {
+        env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0)
+    }
+
+    fn treasury_address(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::TreasuryAddress)
+            .expect("pool is not initialized: treasury address missing")
     }
 
     fn totals(env: &Env) -> PoolTotals {
@@ -1187,6 +1253,18 @@ impl PoolContract {
         }
 
         let yield_amount = amount - funded_amount - refund;
+        let fee_bps = Self::protocol_fee_bps(env);
+        let protocol_cut = if fee_bps > 0 {
+            yield_amount
+                .checked_mul(fee_bps as u128)
+                .expect("fee calculation overflow")
+                .checked_div(10_000)
+                .expect("fee calculation overflow")
+        } else {
+            0
+        };
+        let lp_yield = yield_amount - protocol_cut;
+
         let totals = Self::totals(env);
         let total_deposits = totals.deposits;
         let total_funded = totals.funded;
@@ -1197,10 +1275,10 @@ impl PoolContract {
             .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
         env.storage()
             .instance()
-            .set(&DataKey::TotalDeposits, &(total_deposits + yield_amount));
+            .set(&DataKey::TotalDeposits, &(total_deposits + lp_yield));
         env.storage().instance().set(
             &DataKey::TotalYieldDistributed,
-            &(total_yield + yield_amount),
+            &(total_yield + lp_yield),
         );
         env.storage()
             .instance()
@@ -1213,6 +1291,18 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::ActiveInvoiceCount, &new_active_count);
+
+        // Transfer protocol fee to treasury if any
+        if protocol_cut > 0 {
+            let usdc_id = Self::usdc(env);
+            let usdc = token::Client::new(&env, &usdc_id);
+            let treasury = Self::treasury_address(env);
+            usdc.transfer(
+                &env.current_contract_address(),
+                &treasury,
+                &(protocol_cut as i128),
+            );
+        }
 
         env.storage().persistent().remove(&funded_key);
 
