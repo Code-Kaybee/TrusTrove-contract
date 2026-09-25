@@ -3659,3 +3659,92 @@ fn test_gas_benchmark_deposit_and_withdraw() {
     assert!(withdraw_mem > 0);
     assert_eq!(returned, 5_000_000_000);
 }
+#[test]
+fn test_share_price_appreciation_after_transfer() {
+    // Setup
+    let mut te = setup();
+
+    // LP A deposits
+    let lp_a_initial_deposit = 100_000_000_000;
+    let lp_a_shares_before_deposit = te.pool.get_lp_position(&te.lp).shares;
+    te.pool.deposit(&te.lp, &lp_a_initial_deposit);
+    let lp_a_shares_after_deposit = te.pool.get_lp_position(&te.lp).shares;
+    assert_eq!(lp_a_shares_after_deposit - lp_a_shares_before_deposit, lp_a_initial_deposit);
+
+    // Fund an invoice
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    assert!(te.pool.fund_invoice(&invoice_id));
+
+    // Repay the invoice to accrue yield
+    // Simulate time passing after the due date
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.env.ledger().set_timestamp(te.env.ledger().timestamp() + 86401);
+    te.invoice.repay(&invoice_id);
+
+    // Now the pool has accrued yield (assuming no protocol fee, all yield goes to LPs)
+    // Get the state after repay
+    let stats_after_repay = te.pool.get_stats();
+    let total_shares = stats_after_repay.total_shares;
+    let total_deposits = stats_after_repay.total_deposits;
+    let share_price = if total_shares > 0 { total_deposits / total_shares } else { 0 };
+
+    // LP A transfers half of their shares to LP B
+    let lp_b = Address::generate(&te.env);
+    let lp_a_shares = te.pool.get_lp_position(&te.lp).shares;
+    let transfer_amount = lp_a_shares / 2;
+    assert!(transfer_amount > 0);
+
+    // Perform the transfer
+    te.pool.transfer(&te.lp, &lp_b, &transfer_amount);
+
+    // Get LP positions after transfer
+    let lp_a_pos = te.pool.get_lp_position(&te.lp);
+    let lp_b_pos = te.pool.get_lp_position(&lp_b);
+
+    // Verify share balances
+    assert_eq!(lp_a_pos.shares, lp_a_shares - transfer_amount);
+    assert_eq!(lp_b_pos.shares, transfer_amount);
+
+    // Verify that the per-share value (usdc_value / shares) equals the share price
+    // Note: usdc_value is lp_shares * total_deposits / total_shares
+    let expected_usdc_value_lp_a = lp_a_pos.shares * share_price;
+    let expected_usdc_value_lp_b = lp_b_pos.shares * share_price;
+    assert_eq!(lp_a_pos.usdc_value, expected_usdc_value_lp_a);
+    assert_eq!(lp_b_pos.usdc_value, expected_usdc_value_lp_b);
+
+    // Also verify that the per-share value is the same for both LPs
+    assert_eq!(
+        lp_a_pos.usdc_value / lp_a_pos.shares,
+        lp_b_pos.usdc_value / lp_b_pos.shares
+    );
+    // And that it equals the share price
+    assert_eq!(lp_a_pos.usdc_value / lp_a_pos.shares, share_price);
+}
+#[test]
+fn test_share_price_appreciation_after_transfer() {
+    // Setup
+    let mut te = setup();
+
+    // LP A deposits
+    let lp_a_initial_deposit = 100_000_000_000;
+    let lp_a_shares_before_deposit = te.pool.get_lp_position(&te.lp).shares;
+    te.pool.deposit(&te.lp, &lp_a_initial_deposit);
+    let lp_a_shares_after_deposit = te.pool.get_lp_position(&te.lp).shares;
+    assert_eq!(lp_a_shares_after_deposit - lp_a_shares_before_deposit, lp_a_initial_deposit);
+
+    // Fund an invoice
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    assert!(te.pool.fund_invoice(&invoice_id));
+
+    // Repay the invoice to accrue yield
+    // Simulate time passing after the due date
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.env.ledger().set_timestamp(te.env.ledger().timestamp() + 86401);
+    te.invoice.repay(&invoice_id);
+
+    // Now the pool has accrued yield (assuming no protocol fee, all yield goes to LPs)
+    // Get the state after repay
