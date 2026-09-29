@@ -11,7 +11,7 @@ use soroban_sdk::{
         MockAuth, MockAuthInvoke,
     },
     xdr::ToXdr,
-    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
+    Address, BytesN, Env, IntoVal, InvokeError, String, Symbol, TryFromVal,
 };
 
 use crate::{
@@ -4099,6 +4099,74 @@ fn prop_full_withdrawal_returns_exact_deposit_with_no_yield() {
         .unwrap();
 }
 
+// Once repayment raises the share price above 1, a depositor's immediate
+// deposit and full withdrawal must not extract value from existing LPs.
+#[test]
+fn prop_deposit_then_withdraw_never_returns_more_than_deposited_above_par() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(
+                20_000_000_000u128..=1_000_000_000_000u128,
+                1u32..=500u32,
+                DEFAULT_MIN_INITIAL_DEPOSIT..=1_000_000_000_000u128,
+            ),
+            |(initial_deposit, discount_bps, deposit_amount)| {
+                let te = setup();
+                te.pool.deposit(&te.lp, &initial_deposit);
+
+                let invoice_id = create_and_list_with_params(
+                    &te,
+                    &te.usdc_id,
+                    DEFAULT_FACE_VALUE,
+                    discount_bps,
+                );
+                te.pool.fund_invoice(&invoice_id);
+                te.invoice.mark_shipped(&invoice_id);
+                te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+                te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+                te.env
+                    .ledger()
+                    .set_timestamp(te.env.ledger().timestamp() + 86401);
+                te.invoice.repay(&invoice_id);
+
+                let stats_before = te.pool.get_stats();
+                prop_assert!(
+                    stats_before.total_deposits > stats_before.total_shares,
+                    "repayment must raise the share price above 1"
+                );
+                let existing_lp_value_before = te.pool.get_lp_position(&te.lp).usdc_value;
+                let depositor = create_lp_with_balance(&te, 100_000_000_000_000);
+                let shares_minted = te.pool.deposit(&depositor, &deposit_amount);
+                let usdc_returned = te.pool.withdraw(&depositor, &shares_minted);
+
+                prop_assert!(
+                    usdc_returned <= deposit_amount,
+                    "withdrawal returned {usdc_returned} for deposit {deposit_amount}"
+                );
+                prop_assert!(
+                    stats_before.total_shares > 0,
+                    "share price is undefined when there are no shares"
+                );
+                let ceil_share_price = stats_before
+                    .total_deposits
+                    .div_ceil(stats_before.total_shares);
+                prop_assert!(
+                    deposit_amount - usdc_returned <= ceil_share_price,
+                    "round-trip loss {} exceeds ceil share price {ceil_share_price}",
+                    deposit_amount - usdc_returned
+                );
+                let existing_lp_value_after = te.pool.get_lp_position(&te.lp).usdc_value;
+                prop_assert!(
+                    existing_lp_value_after >= existing_lp_value_before,
+                    "existing LP value decreased from {existing_lp_value_before} to {existing_lp_value_after}"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
 // After a full withdrawal the LP's position must be empty: zero shares,
 // zero USDC value, deposit count zeroed.
 #[test]
@@ -4951,4 +5019,519 @@ fn test_set_protocol_fee_event_reports_treasury_change_with_unchanged_fee() {
     );
     assert_eq!(te.pool.get_treasury(), new_treasury);
     assert_eq!(te.pool.get_protocol_fee_bps(), 500);
+}
+
+// ============== ISSUE #842: MULTI-LP SHARE-SUPPLY CONSERVATION ==============
+//
+// The share ledger lives in two places: `total_supply()` (instance
+// `TotalShares`) and each LP's `balance()` (persistent `LPShares`). Deposit
+// and withdraw must move both together; `transfer`/`transfer_from` must move
+// neither. The property below drives random interleavings of all four entry
+// points across 3-5 LPs and re-checks the invariants after every step, so a
+// sequence can never mint, burn, or strand a share unnoticed.
+
+// Case budget matches the other properties in this file (see the note at the
+// top of the property-test section) to stay within CI time for the in-process
+// Soroban host.
+const PROP_CASES: u32 = 10;
+const PROP_MAX_STEPS: usize = 12;
+
+// Amount bound: wide enough that a single step can exceed any balance built
+// up earlier in the sequence (driving the rejected-step paths), and far below
+// anything that could overflow the pool's u128 scaling.
+const PROP_MAX_AMOUNT: u128 = 10_000_000_000_000;
+
+// Every generated LP starts with more USDC than the whole sequence can spend,
+// so deposits fail on pool rules rather than on the mock token's balance.
+const PROP_LP_USDC: i128 = 100_000_000_000_000;
+
+// Largest LP set a case can generate; cases use the first `lp_count` slots.
+const PROP_MAX_LPS: usize = 5;
+
+// Opening position each LP takes before the random sequence starts: above
+// `DEFAULT_MIN_INITIAL_DEPOSIT`, small enough that random steps routinely
+// exceed it in both directions.
+const PROP_WARMUP_DEPOSIT: u128 = 1_000_000_000;
+
+/// One step of a generated sequence. LP selectors are raw bytes reduced
+/// modulo the case's LP count, so every value addresses a real participant.
+#[derive(Clone, Debug)]
+enum LpStep {
+    Deposit {
+        lp: u8,
+        amount: u128,
+    },
+    Withdraw {
+        lp: u8,
+        shares: u128,
+    },
+    Transfer {
+        from: u8,
+        to: u8,
+        amount: u128,
+    },
+    TransferFrom {
+        owner: u8,
+        spender: u8,
+        to: u8,
+        amount: u128,
+        // Re-approve the grant for `amount` right before the move (SEP-41
+        // `approve` overwrites), so some steps start from a fresh allowance
+        // and others spend whatever earlier grant is still live.
+        fresh_grant: bool,
+    },
+}
+
+/// Outcome of one step, normalised across the four `try_*` return types so
+/// the property loop has a single match to reason about.
+enum StepOutcome {
+    Succeeded,
+    Rejected(Result<soroban_sdk::Error, InvokeError>),
+}
+
+fn classify<T, E>(
+    res: Result<Result<T, E>, Result<soroban_sdk::Error, InvokeError>>,
+) -> StepOutcome {
+    match res {
+        Ok(_) => StepOutcome::Succeeded,
+        Err(err) => StepOutcome::Rejected(err),
+    }
+}
+
+/// Share/USDC sizes come in two buckets: a small one that usually fits inside
+/// an existing balance (keeping the accepted withdraw/transfer paths
+/// reachable) and a large one that regularly exceeds one (keeping the typed
+/// rejections reachable).
+fn step_amount_strategy() -> impl Strategy<Value = u128> {
+    prop_oneof![
+        2 => 0u128..=1_000_000,
+        1 => (PROP_MAX_AMOUNT / 2)..=PROP_MAX_AMOUNT,
+    ]
+}
+
+/// Deposit sizes: mostly large enough to mint shares from an empty pool, with
+/// a minority of zero/below-minimum sizes for the typed rejections.
+fn deposit_amount_strategy() -> impl Strategy<Value = u128> {
+    prop_oneof![
+        2 => DEFAULT_MIN_INITIAL_DEPOSIT..=PROP_MAX_AMOUNT,
+        1 => 0u128..DEFAULT_MIN_INITIAL_DEPOSIT,
+    ]
+}
+
+fn lp_step_strategy() -> impl Strategy<Value = LpStep> {
+    prop_oneof![
+        (any::<u8>(), deposit_amount_strategy())
+            .prop_map(|(lp, amount)| LpStep::Deposit { lp, amount }),
+        (any::<u8>(), step_amount_strategy())
+            .prop_map(|(lp, shares)| LpStep::Withdraw { lp, shares }),
+        (any::<u8>(), any::<u8>(), step_amount_strategy())
+            .prop_map(|(from, to, amount)| LpStep::Transfer { from, to, amount }),
+        (
+            any::<u8>(),
+            any::<u8>(),
+            any::<u8>(),
+            step_amount_strategy(),
+            // Bias towards a fresh grant so the accepted `transfer_from` path
+            // stays reachable; the remainder spends (or misses) earlier grants
+            // and exercises `InsufficientAllowance`.
+            prop_oneof![2 => Just(true), 1 => Just(false)]
+        )
+            .prop_map(
+                |(owner, spender, to, amount, fresh_grant)| LpStep::TransferFrom {
+                    owner,
+                    spender,
+                    to,
+                    amount,
+                    fresh_grant,
+                },
+            ),
+    ]
+}
+
+/// Tops a freshly generated address up with mock USDC so its deposits are
+/// bounded by pool rules instead of by the token balance.
+fn fund_prop_lp(te: &TestEnv, lp: &Address) {
+    te.env.as_contract(&te.usdc_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&TKey(lp.clone()), &PROP_LP_USDC);
+    });
+}
+
+/// Captures the share ledger exactly as the property states it: one balance
+/// per participating LP plus the pool-wide supply.
+fn share_snapshot(te: &TestEnv, lps: &[Address]) -> ([i128; PROP_MAX_LPS], i128) {
+    let mut balances = [0i128; PROP_MAX_LPS];
+    for (slot, lp) in lps.iter().enumerate() {
+        balances[slot] = te.pool.balance(lp);
+    }
+    (balances, te.pool.total_supply())
+}
+
+/// After any step: SEP-41 `balance()` must agree with `get_lp_position()`,
+/// and the balances of the whole LP set must add up to `total_supply()`.
+fn check_share_invariants(te: &TestEnv, lps: &[Address]) -> Result<(), TestCaseError> {
+    let mut sum: i128 = 0;
+    for lp in lps {
+        let balance = te.pool.balance(lp);
+        let position = te.pool.get_lp_position(lp);
+        prop_assert_eq!(
+            balance,
+            position.shares as i128,
+            "balance() and get_lp_position().shares diverge for {:?}",
+            lp
+        );
+        sum += balance;
+    }
+    prop_assert_eq!(
+        sum,
+        te.pool.total_supply(),
+        "sum of LP balances must equal total supply"
+    );
+    Ok(())
+}
+
+/// Dispatches one generated step through its `try_*` entry point so both the
+/// accepted and the rejected path go through the same invariant checks.
+fn run_step(te: &TestEnv, lps: &[Address], step: &LpStep) -> StepOutcome {
+    let at = |raw: &u8| &lps[*raw as usize % lps.len()];
+    match step {
+        LpStep::Deposit { lp, amount } => classify(te.pool.try_deposit(at(lp), amount)),
+        LpStep::Withdraw { lp, shares } => classify(te.pool.try_withdraw(at(lp), shares)),
+        LpStep::Transfer { from, to, amount } => classify(te.pool.try_transfer_shares(
+            at(from),
+            at(to),
+            &(*amount as i128),
+        )),
+        LpStep::TransferFrom {
+            owner,
+            spender,
+            to,
+            amount,
+            fresh_grant,
+        } => {
+            if *fresh_grant {
+                // The grant is setup for the move, not part of the property:
+                // its own result is ignored so a zero amount still revokes
+                // (SEP-41) and the transfer_from below reports the typed
+                // `InsufficientAllowance` failure instead.
+                let expiration_ledger = te.env.ledger().sequence() + 1_000;
+                let _ = te.pool.try_approve(
+                    at(owner),
+                    at(spender),
+                    &(*amount as i128),
+                    &expiration_ledger,
+                );
+            }
+            classify(
+                te.pool
+                    .try_transfer_from(at(spender), at(owner), at(to), &(*amount as i128)),
+            )
+        }
+    }
+}
+
+// Core property: over any bounded interleaving of deposit/withdraw/transfer/
+// transfer_from across 3-5 LPs, every accepted step preserves
+// `sum(balance(lp)) == total_supply()` and `balance(lp) ==
+// get_lp_position(lp).shares`, and every rejected step leaves the whole
+// share ledger byte-for-byte unchanged.
+#[test]
+fn prop_multi_lp_share_supply_conserved_across_op_sequences() {
+    // `TestRunner::run` takes an `Fn`, so the step counters use interior
+    // mutability; `std` is pulled in here for them (crate is `no_std`).
+    extern crate std;
+
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(PROP_CASES));
+    let accepted_steps = std::cell::Cell::new(0usize);
+    let rejected_steps = std::cell::Cell::new(0usize);
+
+    runner
+        .run(
+            &(
+                3usize..=PROP_MAX_LPS,
+                prop::collection::vec(lp_step_strategy(), 1..=PROP_MAX_STEPS),
+            ),
+            |(lp_count, steps)| {
+                let te = setup();
+                let all_lps = [
+                    Address::generate(&te.env),
+                    Address::generate(&te.env),
+                    Address::generate(&te.env),
+                    Address::generate(&te.env),
+                    Address::generate(&te.env),
+                ];
+                let lps = &all_lps[..lp_count];
+                for lp in lps {
+                    fund_prop_lp(&te, lp);
+                }
+
+                // Empty pool starts at zero supply, zero balances.
+                check_share_invariants(&te, lps)?;
+
+                // Warm start: every LP takes an opening position so the
+                // generated steps move shares that actually exist instead of
+                // mostly probing the no-position rejections.
+                for lp in lps {
+                    te.pool.deposit(lp, &PROP_WARMUP_DEPOSIT);
+                }
+                check_share_invariants(&te, lps)?;
+
+                for (index, step) in steps.iter().enumerate() {
+                    let before = share_snapshot(&te, lps);
+                    match run_step(&te, lps, step) {
+                        StepOutcome::Succeeded => {
+                            accepted_steps.set(accepted_steps.get() + 1);
+                            check_share_invariants(&te, lps)?;
+                        }
+                        StepOutcome::Rejected(err) => {
+                            rejected_steps.set(rejected_steps.get() + 1);
+                            match err {
+                                Ok(contract_error) => prop_assert!(
+                                    contract_error.is_type(soroban_sdk::xdr::ScErrorType::Contract),
+                                    "step {} ({:?}) failed outside the typed PoolError space: {:?}",
+                                    index,
+                                    step,
+                                    contract_error
+                                ),
+                                Err(host_error) => prop_assert!(
+                                    false,
+                                    "step {} ({:?}) failed with a host error instead of a typed PoolError: {:?}",
+                                    index,
+                                    step,
+                                    host_error
+                                ),
+                            }
+                            let after = share_snapshot(&te, lps);
+                            prop_assert_eq!(
+                                after,
+                                before,
+                                "step {} ({:?}) was rejected but moved balances or total supply",
+                                index,
+                                step
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    // The generator must actually exercise both sides of the property; a
+    // sequence run in which everything succeeded (or everything failed) would
+    // make the assertions above vacuous.
+    let accepted = accepted_steps.get();
+    let rejected = rejected_steps.get();
+    assert!(
+        accepted > 0 && rejected > 0,
+        "expected both accepted and rejected steps, got {} accepted / {} rejected",
+        accepted,
+        rejected
+    );
+}
+
+// ============== ISSUE #873: STANDARD SEP-41 transfer ENTRY POINT =============
+//
+// The share-token surface was missing the standard `transfer(from, to, amount)`
+// entry point (a prior duplicate-definition collision removed it alongside the
+// `transfer_shares` logic it clashed with, leaving `move_shares` orphaned from
+// a public caller). These tests pin the SEP-41 behavior on the restored
+// function — most importantly that a generic `soroban_sdk::token::Client`
+// can drive it with no pool-specific wrapper.
+
+/// The required generic-client test: any SEP-41 consumer must be able to move
+/// shares with a plain `soroban_sdk::token::Client` pointed at the pool
+/// address, with no pool-specific client in sight.
+#[test]
+fn test_sep41_generic_token_client_transfer_moves_shares() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let recipient = Address::generate(&te.env);
+
+    // The generic SEP-41 client, constructed from the pool address alone.
+    let shares_token = soroban_sdk::token::Client::new(&te.env, &te.pool_id);
+    shares_token.transfer(&te.lp, &recipient, &5_000_000_000);
+
+    assert_eq!(
+        te.pool.get_lp_position(&te.lp).shares,
+        5_000_000_000,
+        "sender's shares must be debited"
+    );
+    assert_eq!(
+        te.pool.get_lp_position(&recipient).shares,
+        5_000_000_000,
+        "recipient's shares must be credited"
+    );
+    // Total share supply is unaffected by a transfer.
+    assert_eq!(te.pool.get_stats().total_shares, 10_000_000_000);
+}
+
+/// `transfer` must credit a recipient who has never interacted with the pool.
+#[test]
+fn test_transfer_to_recipient_without_position_creates_one() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let recipient = Address::generate(&te.env);
+    te.pool.transfer(&te.lp, &recipient, &2_500_000_000);
+
+    let lp_position = te.pool.get_lp_position(&te.lp);
+    assert_eq!(lp_position.shares, 7_500_000_000);
+    assert_eq!(te.pool.get_lp_position(&recipient).shares, 2_500_000_000);
+}
+
+/// The generic client's transfer must enforce `from`'s authorization: with no
+/// signatures provided, the host rejects the transaction.
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_sep41_generic_token_client_transfer_requires_from_auth() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let recipient = Address::generate(&te.env);
+    let shares_token = soroban_sdk::token::Client::new(&te.env, &te.pool_id);
+
+    // Clear all mocked auths so from.require_auth() fails.
+    te.env.set_auths(&[]);
+    shares_token.transfer(&te.lp, &recipient, &1_000_000_000);
+}
+
+/// Balance checks must hold on the standard path: transferring more shares
+/// than `from` owns panics with `InsufficientBalance`.
+#[test]
+#[should_panic(expected = "Error(Contract, #23)")]
+fn test_transfer_insufficient_balance_panics_via_generic_client() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let recipient = Address::generate(&te.env);
+    let shares_token = soroban_sdk::token::Client::new(&te.env, &te.pool_id);
+    shares_token.transfer(&te.lp, &recipient, &20_000_000_000);
+}
+
+/// A sender with no share position at all panics with `NoShares`.
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_transfer_from_address_without_shares_panics() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let stranger = Address::generate(&te.env);
+    let recipient = Address::generate(&te.env);
+    let shares_token = soroban_sdk::token::Client::new(&te.env, &te.pool_id);
+    shares_token.transfer(&stranger, &recipient, &1);
+}
+
+/// Zero and negative amounts are rejected on the standard entry point.
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_transfer_zero_amount_panics_via_generic_client() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let recipient = Address::generate(&te.env);
+    let shares_token = soroban_sdk::token::Client::new(&te.env, &te.pool_id);
+    shares_token.transfer(&te.lp, &recipient, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_transfer_negative_amount_panics_via_generic_client() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let recipient = Address::generate(&te.env);
+    let shares_token = soroban_sdk::token::Client::new(&te.env, &te.pool_id);
+    shares_token.transfer(&te.lp, &recipient, &-5);
+}
+
+/// Both SEP-41 entry points emit the standard `transfer(from, to, amount)`
+/// event shape, so generic indexers can watch share movements.
+#[test]
+fn test_transfer_and_transfer_from_emit_standard_transfer_event() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let recipient = Address::generate(&te.env);
+    let spender = Address::generate(&te.env);
+    let expires = te.env.ledger().sequence() + 100;
+
+    let before = te.env.events().all().len();
+    te.pool.transfer(&te.lp, &recipient, &1_000_000_000);
+    let events = te.env.events().all();
+    assert_eq!(events.len(), before + 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 2);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "transfer")
+    );
+    assert_eq!(
+        Address::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        te.lp
+    );
+    assert_eq!(
+        <(Address, i128)>::try_from_val(&te.env, &data).unwrap(),
+        (recipient.clone(), 1_000_000_000)
+    );
+
+    // The allowance path emits the identical standard event shape (approve
+    // itself emits `allowance_approved`, hence the +2).
+    let before = te.env.events().all().len();
+    te.pool.approve(&te.lp, &spender, &2_000_000_000, &expires);
+    te.pool
+        .transfer_from(&spender, &te.lp, &recipient, &2_000_000_000);
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(events.len(), before + 2);
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "transfer")
+    );
+    assert_eq!(
+        <(Address, i128)>::try_from_val(&te.env, &data).unwrap(),
+        (recipient.clone(), 2_000_000_000)
+    );
+}
+
+/// `transfer` and `transfer_shares` must be interchangeable: both entry
+/// points move shares identically (transfer_shares is the documented
+/// non-standard legacy alias).
+#[test]
+fn test_transfer_matches_legacy_transfer_shares() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let recipient = Address::generate(&te.env);
+    te.pool.transfer_shares(&te.lp, &recipient, &5_000_000_000);
+
+    let second_recipient = Address::generate(&te.env);
+    te.pool.transfer(&te.lp, &second_recipient, &5_000_000_000);
+
+    assert_eq!(te.pool.get_lp_position(&recipient).shares, 5_000_000_000);
+    assert_eq!(
+        te.pool.get_lp_position(&second_recipient).shares,
+        5_000_000_000
+    );
+    assert_eq!(te.pool.get_lp_position(&te.lp).shares, 0);
+}
+
+/// Self-transfers remain a no-op on the standard entry point.
+#[test]
+fn test_transfer_same_address_no_op_via_generic_client() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let before = te.pool.get_lp_position(&te.lp);
+    let shares_token = soroban_sdk::token::Client::new(&te.env, &te.pool_id);
+    shares_token.transfer(&te.lp, &te.lp, &5_000_000_000);
+    let after = te.pool.get_lp_position(&te.lp);
+
+    assert_eq!(before.shares, after.shares);
+    assert_eq!(te.pool.get_stats().total_shares, 10_000_000_000);
 }
