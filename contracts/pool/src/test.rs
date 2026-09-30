@@ -2995,6 +2995,43 @@ fn test_initialize_rejects_each_pairwise_address_collision() {
     }
 }
 
+#[test]
+fn test_initialize_rejects_treasury_aliases() {
+    let te = setup();
+    let invoice_id = te.invoice.address.clone();
+    let registry_id = te.registry.address.clone();
+
+    // Each attempt gets a fresh pool address so the test covers treasury
+    // aliases to the pool, invoice, escrow, registry, and funding asset.
+    for role in 0..5 {
+        let pool_id = te.env.register_contract(None, PoolContract);
+        let treasury = match role {
+            0 => pool_id.clone(),
+            1 => invoice_id.clone(),
+            2 => te.escrow_id.clone(),
+            3 => registry_id.clone(),
+            _ => te.usdc_id.clone(),
+        };
+        let pool = PoolContractClient::new(&te.env, &pool_id);
+        let result = pool.try_initialize(
+            &te.admin,
+            &invoice_id,
+            &te.escrow_id,
+            &te.usdc_id,
+            &registry_id,
+            &treasury,
+            &DEFAULT_MIN_INITIAL_DEPOSIT,
+            &String::from_str(&te.env, TEST_SHARE_NAME),
+            &String::from_str(&te.env, TEST_SHARE_SYMBOL),
+            &DEFAULT_SHARE_DECIMALS,
+        );
+        assert!(
+            result.is_err(),
+            "treasury alias for role {role} was accepted"
+        );
+    }
+}
+
 // ============== ISSUE #265: PREVENT ALREADYFUNDED SILENT SHADOWING ==============
 
 // If a `FundedInvoice` entry already exists for an invoice id, fund_invoice
@@ -4411,6 +4448,25 @@ fn test_set_protocol_fee_at_max_cap_succeeds() {
     assert_eq!(te.pool.get_treasury(), treasury);
 }
 
+#[test]
+fn test_set_protocol_fee_rejects_treasury_aliases() {
+    let te = setup();
+    let forbidden_treasuries = [
+        te.pool_id.clone(),
+        te.invoice.address.clone(),
+        te.escrow_id.clone(),
+        te.registry.address.clone(),
+        te.usdc_id.clone(),
+    ];
+
+    for treasury in forbidden_treasuries {
+        assert!(
+            te.pool.try_set_protocol_fee(&500, &treasury).is_err(),
+            "treasury alias was accepted"
+        );
+    }
+}
+
 // ============== ISSUE #770: DEFAULT-ZERO PROTOCOL FEE ACCOUNTING REGRESSION ==============
 
 #[test]
@@ -5534,4 +5590,161 @@ fn test_transfer_same_address_no_op_via_generic_client() {
 
     assert_eq!(before.shares, after.shares);
     assert_eq!(te.pool.get_stats().total_shares, 10_000_000_000);
+}
+
+// ============== ISSUE #844: UTILIZATION / FUNDING ACCOUNTING ==============
+//
+// Invariants, across arbitrary sequences of deposit / fund_invoice /
+// receive_repayment / handle_default / withdraw with a random cap:
+//   * `get_stats().total_funded <= total_deposits`
+//   * `available_liquidity == total_deposits - total_funded`
+//   * after a successful `fund_invoice`, `get_utilization_rate() <=
+//     get_stats().max_utilization_bps`
+//   * a rejected step leaves the accounting byte-for-byte unchanged.
+
+#[derive(Clone, Debug)]
+enum FundStep {
+    Deposit(u128),
+    Fund(u8),
+    Repay(u128),
+    Default,
+    Withdraw(u128),
+    SetCap(u32),
+}
+
+fn fund_step_strategy() -> impl Strategy<Value = FundStep> {
+    prop_oneof![
+        deposit_amount_strategy().prop_map(FundStep::Deposit),
+        any::<u8>().prop_map(FundStep::Fund),
+        step_amount_strategy().prop_map(FundStep::Repay),
+        Just(FundStep::Default),
+        step_amount_strategy().prop_map(FundStep::Withdraw),
+        (0u32..=10_000u32).prop_map(FundStep::SetCap),
+    ]
+}
+
+fn run_fund_step(te: &TestEnv, invoices: &[BytesN<32>; 3], step: &FundStep) -> StepOutcome {
+    match step {
+        FundStep::Deposit(amount) => classify(te.pool.try_deposit(&te.lp, amount)),
+        FundStep::Fund(index) => {
+            let id = invoices[*index as usize % invoices.len()].clone();
+            classify(te.pool.try_fund_invoice(&id))
+        }
+        FundStep::Repay(amount) => {
+            let id = invoices[0].clone();
+            classify(te.pool.try_receive_repayment(&id, amount))
+        }
+        FundStep::Default => classify(te.pool.try_handle_default(&invoices[0])),
+        FundStep::Withdraw(shares) => classify(te.pool.try_withdraw(&te.lp, shares)),
+        FundStep::SetCap(bps) => classify(te.pool.try_set_max_utilization(&te.admin, bps)),
+    }
+}
+
+/// `(total_deposits, total_funded, available_liquidity, max_utilization_bps)`.
+fn fund_snapshot(te: &TestEnv) -> (u128, u128, u128, u32) {
+    let stats = te.pool.get_stats();
+    (
+        stats.total_deposits,
+        stats.total_funded,
+        stats.available_liquidity,
+        stats.max_utilization_bps,
+    )
+}
+
+/// After any step: never more funded than deposited, and available liquidity is
+/// exactly deposits minus funded.
+fn check_fund_invariants(te: &TestEnv) -> Result<(), TestCaseError> {
+    let stats = te.pool.get_stats();
+    prop_assert!(
+        stats.total_funded <= stats.total_deposits,
+        "total_funded {} exceeds total_deposits {}",
+        stats.total_funded,
+        stats.total_deposits
+    );
+    prop_assert_eq!(
+        stats.available_liquidity,
+        stats.total_deposits - stats.total_funded,
+        "available_liquidity must equal total_deposits - total_funded"
+    );
+    Ok(())
+}
+
+#[test]
+fn prop_utilization_cap_and_funding_accounting_hold_across_op_sequences() {
+    extern crate std;
+
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(PROP_CASES));
+    let accepted_steps = std::cell::Cell::new(0usize);
+    let rejected_steps = std::cell::Cell::new(0usize);
+
+    runner
+        .run(
+            &(
+                // Sometimes a very tight cap (mostly rejections), sometimes a
+                // full cap (so funding can succeed and the cap assertion bites).
+                prop_oneof![1 => 0u32..=500u32, 1 => 1u32..=10_000u32],
+                prop::collection::vec(fund_step_strategy(), 1..=PROP_MAX_STEPS),
+            ),
+            |(cap_bps, steps)| {
+                let te = setup();
+                te.pool.set_max_utilization(&te.admin, &cap_bps);
+
+                // A small set of fundable invoices plus enough LP liquidity.
+                let invoices = [
+                    create_and_list(&te, &te.usdc_id),
+                    create_and_list(&te, &te.usdc_id),
+                    create_and_list(&te, &te.usdc_id),
+                ];
+                fund_prop_lp(&te, &te.lp);
+                te.pool.deposit(&te.lp, &PROP_WARMUP_DEPOSIT);
+
+                check_fund_invariants(&te)?;
+
+                for (index, step) in steps.iter().enumerate() {
+                    let before = fund_snapshot(&te);
+                    let outcome = run_fund_step(&te, &invoices, step);
+
+                    // The core invariants hold after every step.
+                    check_fund_invariants(&te)?;
+
+                    match outcome {
+                        StepOutcome::Succeeded => {
+                            accepted_steps.set(accepted_steps.get() + 1);
+                            if let FundStep::Fund(_) = step {
+                                let util = te.pool.get_utilization_rate();
+                                let cap = te.pool.get_stats().max_utilization_bps;
+                                prop_assert!(
+                                    util <= cap,
+                                    "step {}: funding pushed utilization {} above cap {}",
+                                    index,
+                                    util,
+                                    cap
+                                );
+                            }
+                        }
+                        StepOutcome::Rejected(_) => {
+                            rejected_steps.set(rejected_steps.get() + 1);
+                            prop_assert_eq!(
+                                fund_snapshot(&te),
+                                before,
+                                "step {} ({:?}) was rejected but moved accounting",
+                                index,
+                                step
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    // The generator must exercise both sides; otherwise the assertions above
+    // would be vacuous.
+    assert!(
+        accepted_steps.get() > 0 && rejected_steps.get() > 0,
+        "expected both accepted and rejected steps, got {} accepted / {} rejected",
+        accepted_steps.get(),
+        rejected_steps.get()
+    );
 }
