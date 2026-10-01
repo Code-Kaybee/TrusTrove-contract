@@ -1841,8 +1841,8 @@ fn test_receive_repayment() {
         invoice_id
     );
     assert_eq!(
-        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
-        (10_000_000_000, yield_amount)
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000, yield_amount, 0)
     );
 }
 
@@ -2008,8 +2008,8 @@ fn test_receive_repayment_with_refund_happy_path() {
         invoice_id
     );
     assert_eq!(
-        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
-        (amount, yield_amount)
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, yield_amount, 0)
     );
 }
 
@@ -2086,8 +2086,8 @@ fn test_receive_repayment_with_refund_zero_refund_matches_receive_repayment() {
         invoice_id
     );
     assert_eq!(
-        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
-        (amount, DEFAULT_YIELD_AMOUNT)
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, DEFAULT_YIELD_AMOUNT, 0)
     );
 }
 
